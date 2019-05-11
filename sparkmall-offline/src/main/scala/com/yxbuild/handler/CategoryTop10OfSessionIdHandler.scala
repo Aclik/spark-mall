@@ -1,8 +1,12 @@
 package com.yxbuild.handler
 
-import com.yxbuild.accu.CategoryTop10OfSessionIdAccumulator
-import com.yxbuild.utils.JdbcUtil
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import java.util.{Properties, UUID}
+
+import com.alibaba.fastjson.JSON
+import com.yxbuild.dataMode.UserVisitAction
+import com.yxbuild.utils.{JdbcUtil, PropertiesUtil}
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.SparkSession
 
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
@@ -31,68 +35,76 @@ object CategoryTop10OfSessionIdHandler {
     * @param categoryTop10List 前10个热门分类
     * @return (任务标识_商品分类标识_SessionId,点击次数)
     */
-  def getCategoryTop10OfSessionId(spark:SparkSession,categoryTop10List:ListBuffer[mutable.HashMap[String,String]]): ListBuffer[(String,Long)] ={
-    // 1、创建累加器对象
-    val categoryTop10OfSessionIdAccumulator = new CategoryTop10OfSessionIdAccumulator
+  def getCategoryTop10OfSessionId(spark:SparkSession,categoryTop10List:ListBuffer[mutable.HashMap[String,String]]): RDD[List[(String, String, Int)]] ={
 
-    // 2、注册累加器
-    spark.sparkContext.register(categoryTop10OfSessionIdAccumulator)
+    // 1、将Top10热门品类转换成RDD -> Map(taskId -> 417db60a-03cc-459e-a2b6-e0fb667cbe83, pay_count -> 329, category_id -> 14, click_count -> 1637, order_count -> 482)
+    val categoryTop10RDD: RDD[mutable.HashMap[String, String]] = spark.sparkContext.makeRDD(categoryTop10List)
 
-    // 3、获取Top10商品分类的每个SessionId,并且进行累计,数据格式(任务表示_商品分类表示_session标识,点击次数)
-    categoryTop10List.foreach(categoryTop10 => {
-      // 4、获取任务标识
-      val taskId: String = categoryTop10.getOrElse("taskId","") // 任务ID
-      // 5、获取商品分类标识
-      val categoryId: String = categoryTop10.getOrElse("category_id","") // 商品分类ID
-      // 6、根据商品分类标识获取所有点击过该商品分类的Session标识
-      val sql = new StringBuilder
-      sql.append("select session_id from user_visit_action where 1=1")
-      sql.append(s" and click_category_id = '$categoryId'")
-      val dataFrame: DataFrame = spark.sql(sql.toString())
-      // 7、通过累加器进行累计该商品分类被点击SessionId点击次数
-      dataFrame.foreach(x => {
-        categoryTop10OfSessionIdAccumulator.add(taskId + "_" + categoryId + "_" + x)
-      })
+    // 2、获取过滤数据 -> UserVisitAction(2018-11-26,72,454454f7-9d9c-42ff-aa94-8daeaf87506a,33,2018-11-26 10:51:04,吃鸡,-1,-1,null,null,null,null,21)
+    val conditionsStr: Properties = PropertiesUtil.load("conditions.properties")
+    val userVisitActionRDD: RDD[UserVisitAction] = CategoryTop10Handler.readAndFilterData(JSON.
+      parseObject(conditionsStr.getProperty("condition.params.json")),spark)
+
+    // categoryTop10List.foreach(println) -> Map(taskId -> 417db60a-03cc-459e-a2b6-e0fb667cbe83, pay_count -> 332, category_id -> 1, click_count -> 1696, order_count -> 529)
+    // 3、获取Top10的品类ID
+    val categoryIdList = new ListBuffer[String]()
+    categoryTop10List.foreach(x => {
+      categoryIdList.append(x.getOrElse("category_id",""))
     })
 
-    // 8、获取累加器累加的结果
-    val sessIdMap: mutable.HashMap[String, Long] = categoryTop10OfSessionIdAccumulator.value
-
-    // 9、对累加器的结果进行分组,目的为了按照任务标识和商品分类标识进行对用户点击该商品分类的次数进行归类
-    val sessionIdGroupMap = sessIdMap.groupBy(x => {
-      val key: String = x._1
-      val strings: Array[String] = key.split("_")
-      strings(0) + "_" + strings(1) // 以任务标识和商品分类标识做为key
+    // 3、过滤数据---获取点击到Top10品类的用户行为信息
+    val filterUserVisitActionRDD: RDD[UserVisitAction] = userVisitActionRDD.filter(x => {
+      categoryIdList.contains(x.click_category_id.toString)
     })
 
-    // 10、对分组中的结果进行排序,并且获取每个商品分类被点击次数最多的SessionID进行记录和返回
-    val resultList = new ListBuffer[(String,Long)]
-    sessionIdGroupMap.foreach(x => {
-      // 11、对每个分组的value值进行排序
-      val descSessionIdSortMap: List[(String, Long)] = x._2.toList.sortBy(y => {
-        y._2
-      }).reverse
-      // 12、获取点击次数最多的前10个SessionID
-      val top10SessionList: List[(String, Long)] = descSessionIdSortMap.take(10)
-      // 14、记录每个商品点击的次数和前10个SessionId
-      resultList ++= top10SessionList
+    // 4、计数 -> (categoryId_session_Id,1)
+    val countToOneRDD: RDD[(String, Int)] = filterUserVisitActionRDD.map(x => {
+      (s"${x.click_category_id}_${x.session_id}", 1)
     })
-    resultList
+
+    // 5、算和
+    val countToSumRDD: RDD[(String, Int)] = countToOneRDD.reduceByKey(_+_)
+
+    // 6、重新配置维度(品类ID，sessionId,点击总数)
+    val resetRDD: RDD[(String, String, Int)] = countToSumRDD.map(x => {
+      (x._1.split("_")(0), x._1.split("_")(1), x._2)
+    })
+
+    // 6、根据品类进行分组
+    val groupRDD: RDD[(String, Iterable[(String, String, Int)])] = resetRDD.groupBy(x => {
+      x._1
+    })
+
+    // 7、排序
+    val sortRDD: RDD[List[(String, String, Int)]] = groupRDD.map(x => {
+      x._2.toList.sortWith {
+        case (item1, item2) => {
+          item1._3 > item2._3
+        }
+      }
+    })
+
+    // 8、获取前10
+    val top10SessionId: RDD[List[(String, String, Int)]] = sortRDD.map(x => {
+      x.take(10)
+    })
+    top10SessionId
   }
 
   /**
     * 将数据保存到MySQL数据库
     *
-    * @param top10SessionList
+    * @param top10SessionRDD 每个热门点击次数最多的前10为Session
     */
-  def saveToMySQL(top10SessionList: ListBuffer[(String, Long)]): Unit = {
+  def saveToMySQL(top10SessionRDD: RDD[List[(String, String, Int)]] ): Unit = {
     // 将前10条数据保存到数据库
     val sql = new StringBuilder
     sql.append("insert into category_session_top10 values(?,?,?,?)")
     val paramList = new ListBuffer[Array[Any]]
-    top10SessionList.foreach(x => {
-      val idArray: Array[String] = x._1.split("_")
-      paramList.append(Array(idArray(0),idArray(1),idArray(2),x._2))
+    top10SessionRDD.collect().foreach(x => {
+      x.foreach(y => {
+        paramList.append(Array(UUID.randomUUID().toString,y._1,y._2,y._3))
+      })
     })
     JdbcUtil.executeBatchUpdate(sql.toString(),paramList)
   }

@@ -2,6 +2,7 @@ package com.yxbuild.app
 
 import com.yxbuild.handler.CategoryTop10OfSessionIdHandler
 import org.apache.spark.SparkConf
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 
 import scala.collection.mutable
@@ -38,10 +39,10 @@ object CategoryTop10OfSessionId {
     val stringToStrings: ListBuffer[mutable.HashMap[String, String]] = CategoryTop10OfSessionIdHandler.getCategoryTop10ByMySQL(spark)
 
     // 4、获取Top10商品分类的点击次数最多的相关信息
-    val top10SeesionList: ListBuffer[(String, Long)] = CategoryTop10OfSessionIdHandler.getCategoryTop10OfSessionId(spark,stringToStrings)
+    val top10SessionList: RDD[List[(String, String, Int)]] = CategoryTop10OfSessionIdHandler.getCategoryTop10OfSessionId(spark,stringToStrings)
 
     // 5、将信息保存到MySQL数据库
-    CategoryTop10OfSessionIdHandler.saveToMySQL(top10SeesionList)
+    CategoryTop10OfSessionIdHandler.saveToMySQL(top10SessionList)
 
     // 6、关闭资源
     spark.close()

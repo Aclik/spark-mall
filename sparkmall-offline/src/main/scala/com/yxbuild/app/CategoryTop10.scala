@@ -41,6 +41,7 @@ object CategoryTop10 {
 
     // 6、运用累加器计算用户三种行为(点击、订单、支付)的次数
     val categoryTop10List: List[(String, mutable.HashMap[String, Long])] = CategoryTop10Handler.getCategoryTop10(userVisitActionRDD,sparkSession)
+    categoryTop10List.foreach(println)
 
     // 7、保存商品分类Top10到MySQL数据库
     CategoryTop10Handler.saveCategoryTop10ToMySQL(categoryTop10List)

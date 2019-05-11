@@ -7,6 +7,7 @@ import com.yxbuild.accu.CategoryTop10Accumulator
 import com.yxbuild.dataMode.UserVisitAction
 import com.yxbuild.utils.JdbcUtil
 import org.apache.commons.lang3.StringUtils
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
